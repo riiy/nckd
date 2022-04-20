@@ -1,0 +1,18 @@
+[submodule "libs/cpool"]
+	path = libs/cpool
+	url = git@github.com:riiy/connection-pool.git
+[submodule "libs/jwt-cpp"]
+	path = libs/jwt-cpp
+	url = git@github.com:prince-chrismc/jwt-cpp.git
+[submodule "libs/json"]
+	path = libs/json
+	url = git@github.com:nlohmann/json.git
+[submodule "libs/spdlog"]
+	path = libs/spdlog
+	url = git@github.com:gabime/spdlog.git
+[submodule "libs/gtest"]
+	path = libs/gtest
+	url = https://github.com/google/googletest
+[submodule "libs/httplib"]
+	path = libs/httplib
+	url = git@github.com:riiy/cpp-httplib.git
