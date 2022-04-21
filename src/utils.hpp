@@ -5,6 +5,7 @@
 #include <string_view>
 #include <libpq-fe.h>
 #include <cpool/pool.h>
+#include <random>
 using namespace std;
 using namespace httplib;
 using namespace cpool;
@@ -93,11 +94,7 @@ constexpr std::string_view type_name()
     return string_view(p.data() + 84, p.size() - 84 - 7);
 #endif
 }
-static void exit_nicely(PGconn *conn)
-{
-    PQfinish(conn);
-    exit(1);
-}
+
 namespace cpool
 {
 class PGConnection final : public Connection
@@ -120,7 +117,6 @@ class PGConnection final : public Connection
             fprintf(stderr,
                     "Connection to database failed: %s",
                     PQerrorMessage(conn));
-            exit_nicely(conn);
             return false;
         }
         connected = true;
@@ -169,3 +165,82 @@ class ConnectionPoolFactory<PGConnection>
 };
 
 }  // namespace cpool
+
+static void
+show_binary_results(PGresult *res)
+{
+    int         i,
+                j;
+    int         i_fnum,
+                t_fnum,
+                b_fnum;
+
+    /* Use PQfnumber to avoid assumptions about field order in result */
+    i_fnum = PQfnumber(res, "i");
+    t_fnum = PQfnumber(res, "t");
+    b_fnum = PQfnumber(res, "b");
+
+    for (i = 0; i < PQntuples(res); i++)
+    {
+        char       *iptr;
+        char       *tptr;
+        char       *bptr;
+        int         blen;
+        int         ival;
+
+        /* Get the field values (we ignore possibility they are null!) */
+        iptr = PQgetvalue(res, i, i_fnum);
+        tptr = PQgetvalue(res, i, t_fnum);
+        bptr = PQgetvalue(res, i, b_fnum);
+
+        /*
+         * The binary representation of INT4 is in network byte order, which
+         * we'd better coerce to the local byte order.
+         */
+        ival = ntohl(*((uint32_t *) iptr));
+
+        /*
+         * The binary representation of TEXT is, well, text, and since libpq
+         * was nice enough to append a zero byte to it, it'll work just fine
+         * as a C string.
+         *
+         * The binary representation of BYTEA is a bunch of bytes, which could
+         * include embedded nulls so we have to pay attention to field length.
+         */
+        blen = PQgetlength(res, i, b_fnum);
+
+        printf("tuple %d: got\n", i);
+        printf(" i = (%d bytes) %d\n",
+               PQgetlength(res, i, i_fnum), ival);
+        printf(" t = (%d bytes) '%s'\n",
+               PQgetlength(res, i, t_fnum), tptr);
+        printf(" b = (%d bytes) ", blen);
+        for (j = 0; j < blen; j++)
+            printf("\\%03o", bptr[j]);
+        printf("\n\n");
+    }
+}
+
+bool is_valid(const string& email)
+{
+
+    // Regular expression definition
+    const regex pattern(
+        "(\\w+)(\\.|_)?(\\w*)@(\\w+)(\\.(\\w+))+");
+
+    // Match the string pattern
+    // with regular expression
+    return regex_match(email, pattern);
+}
+
+std::string random_string(int max_length=32)
+{
+     std::string str("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+
+     std::random_device rd;
+     std::mt19937 generator(rd());
+
+     std::shuffle(str.begin(), str.end(), generator);
+
+     return str.substr(0, max_length);    // assumes 32 < number of characters in str
+}

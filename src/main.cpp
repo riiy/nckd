@@ -6,6 +6,13 @@
 #include <iostream>
 #include <libpq-fe.h>
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
+#include "argon2.h"
+
+#define OUT_LEN 32
+#define ENCODED_LEN 108
+
+using json = nlohmann::json;
 
 using namespace httplib;
 using namespace std;
@@ -54,86 +61,228 @@ int main(int argc, const char *argv[])
         res.set_content(table, "text/plain");
     });
 
-    svr.Post("/hi", [&](const auto &req, auto &ret) {
+    svr.Post("/login/", [&](const auto &req, auto &ret) {
+        auto req_json = json::parse(req.body);
+        std::string email = req_json["email"];
+        if (!is_valid(email))
+        {
+            // 错误码：参数错误为10 02 XX
+            throw std::runtime_error("100201");
+        }
+        std::string passwd = req_json["password"];
+        if (passwd.length() < 6)
+        {
+            // 错误码：参数错误为10 02 XX
+            throw std::runtime_error("100202");
+        }
         auto connection = pool->get_connection();
+        if (!connection.valid())
+        {
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100101");
+        }
         auto &test_connection = dynamic_cast<PGConnection &>(*connection);
         auto conn = test_connection.acquire();
         PGresult *res;
-        int nFields;
-        int i, j;
-        /* 检查后端连接成功建立 */
-        if (PQstatus(conn) != CONNECTION_OK)
-        {
-            fprintf(stderr,
-                    "Connection to database failed: %s",
-                    PQerrorMessage(conn));
-            exit_nicely(conn);
-        }
-
-        /*
-         * 我们的测试实例涉及游标的使用，这个时候我们必须使用事务块。
-         * 我们可以把全部事情放在一个  "select * from pg_database"
-         * PQexec() 里，不过那样太简单了，不是个好例子。
-         */
-
         /* 开始一个事务块 */
         res = PQexec(conn, "BEGIN");
         if (PQresultStatus(res) != PGRES_COMMAND_OK)
         {
             fprintf(stderr, "BEGIN command failed: %s", PQerrorMessage(conn));
             PQclear(res);
-        }
-
-        /*
-         * 应该在结果不需要的时候 PQclear PGresult，以避免内存泄漏
-         */
-        PQclear(res);
-
-        /*
-         * 从系统表 pg_database（数据库的系统目录）里抓取数据
-         */
-        res = PQexec(conn,
-                     "DECLARE myportal CURSOR FOR select * from pg_database");
-        if (PQresultStatus(res) != PGRES_COMMAND_OK)
-        {
-            fprintf(stderr, "DECLARE CURSOR failed: %s", PQerrorMessage(conn));
-            PQclear(res);
-            exit_nicely(conn);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100102");
         }
         PQclear(res);
-
-        res = PQexec(conn, "FETCH ALL in myportal");
+        const char *paramValues[1];
+        paramValues[0] = email.c_str();
+        res = PQexecParams(conn,
+                           "SELECT password, id FROM users WHERE email=$1;",
+                           1,    /* one param */
+                           NULL, /* let the backend deduce param type */
+                           paramValues,
+                           NULL, /* don't need param lengths since text */
+                           NULL, /* default to all text params */
+                           0);
         if (PQresultStatus(res) != PGRES_TUPLES_OK)
         {
             fprintf(stderr, "FETCH ALL failed: %s", PQerrorMessage(conn));
             PQclear(res);
-            exit_nicely(conn);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100103");
         }
-
-        /* 首先，打印属性名称 */
-        nFields = PQnfields(res);
-        for (i = 0; i < nFields; i++)
-            printf("%-15s", PQfname(res, i));
-        printf("\n\n");
-
-        /* 然后打印行 */
-        for (i = 0; i < PQntuples(res); i++)
+        if (PQntuples(res) != 1)
         {
-            for (j = 0; j < nFields; j++)
-                printf("%-15s", PQgetvalue(res, i, j));
-            printf("\n");
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100104");
         }
+        auto pass = std::string(PQgetvalue(res, 0, 0));
+        auto uid = std::string(PQgetvalue(res, 0, 1));
 
+        if (argon2_verify(pass.c_str(),
+                          passwd.c_str(),
+                          strlen(passwd.c_str()),
+                          Argon2_id) != ARGON2_OK)
+        {
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：业务错误为10 03 XX
+            throw std::runtime_error("100302");
+        }
         PQclear(res);
-
-        /* 关闭入口 ... 我们不用检查错误 ... */
-        res = PQexec(conn, "CLOSE myportal");
-        PQclear(res);
-
+        auto token = random_string(48);
+        const char *paramValues2[2];
+        paramValues2[0] = token.c_str();
+        paramValues2[1] = uid.c_str();
+        res = PQexecParams(conn,
+                           "update users set token=$1 where id=$2;",
+                           2,    /* one param */
+                           NULL, /* let the backend deduce param type */
+                           paramValues2,
+                           NULL, /* don't need param lengths since text */
+                           NULL, /* default to all text params */
+                           0);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        {
+            fprintf(stderr, "FETCH ALL failed: %s", PQerrorMessage(conn));
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100103");
+        }
+        else
+        {
+            std::cout << "Update counts: " << PQcmdTuples(res) << std::endl;
+        }
         /* 结束事务 */
         res = PQexec(conn, "END");
         pool->release_connection(std::move(connection));
-        string content = "{\"key\": \"value\"}";
+
+        std::string content =
+            "{\"code\":\"0\", \"data\": {\"token\": \"";
+        content.append(token). append("\"}}");
+        ret.set_content(content, "application/json");
+    });
+    svr.Post("/register/", [&](const auto &req, auto &ret) {
+        auto sql = "select * from users where email=$1;";
+        auto req_json = json::parse(req.body);
+        std::string email = req_json["email"];
+        if (!is_valid(email))
+        {
+            // 错误码：参数错误为10 02 XX
+            throw std::runtime_error("100201");
+        }
+        std::string passwd = req_json["password"];
+        if (passwd.length() < 6)
+        {
+            // 错误码：参数错误为10 02 XX
+            throw std::runtime_error("100202");
+        }
+        auto connection = pool->get_connection();
+        if (!connection.valid())
+        {
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100101");
+        }
+        auto &test_connection = dynamic_cast<PGConnection &>(*connection);
+        auto conn = test_connection.acquire();
+        PGresult *res;
+        /* 开始一个事务块 */
+        res = PQexec(conn, "BEGIN");
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        {
+            fprintf(stderr, "BEGIN command failed: %s", PQerrorMessage(conn));
+            PQclear(res);
+            /* 关闭入口 ... 我们不用检查错误 ... */
+            res = PQexec(conn, "CLOSE myportal");
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100101");
+        }
+        PQclear(res);
+        const char *paramValues[1];
+        paramValues[0] = email.c_str();
+        res = PQexecParams(conn,
+                           sql,
+                           1,    /* one param */
+                           NULL, /* let the backend deduce param type */
+                           paramValues,
+                           NULL, /* don't need param lengths since text */
+                           NULL, /* default to all text params */
+                           0);
+        if (PQresultStatus(res) != PGRES_TUPLES_OK)
+        {
+            fprintf(stderr, "FETCH ALL failed: %s", PQerrorMessage(conn));
+            PQclear(res);
+            /* 关闭入口 ... 我们不用检查错误 ... */
+            res = PQexec(conn, "CLOSE myportal");
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100101");
+        }
+        if (PQntuples(res) > 0)
+        {
+            PQclear(res);
+            /* 关闭入口 ... 我们不用检查错误 ... */
+            res = PQexec(conn, "CLOSE myportal");
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：业务错误为10 03 XX
+            throw std::runtime_error("100303");
+        }
+        unsigned char out[OUT_LEN];
+        unsigned char hex_out[OUT_LEN * 2 + 4];
+        char encoded[ENCODED_LEN];
+        int hash_ret;
+        auto salt = random_string(8);
+
+        SPDLOG_INFO(salt);
+        SPDLOG_INFO(passwd);
+        hash_ret = argon2_hash(2,
+                               1 << 16,
+                               1,
+                               passwd.c_str(),
+                               strlen(passwd.c_str()),
+                               salt.c_str(),
+                               8,
+                               out,
+                               OUT_LEN,
+                               encoded,
+                               ENCODED_LEN,
+                               Argon2_id,
+                               ARGON2_VERSION_10);
+        if (hash_ret == ARGON2_OK)
+        {
+            SPDLOG_INFO(encoded);
+        }
+        SPDLOG_INFO(hash_ret);
+        PQclear(res);
+        /* 关闭入口 ... 我们不用检查错误 ... */
+        res = PQexec(conn, "CLOSE myportal");
+        /* 结束事务 */
+        res = PQexec(conn, "END");
+        pool->release_connection(std::move(connection));
+        std::string content = std::string(encoded);
         ret.set_content(content, "application/json");
     });
 
@@ -144,10 +293,17 @@ int main(int argc, const char *argv[])
         const char *fmt =
             "<p>Error Status: <span style='color:red;'>%d</span></p>";
         char buf[BUFSIZ];
+        std::cout << res.status << endl;
         snprintf(buf, sizeof(buf), fmt, res.status);
         res.set_content(buf, "text/html");
     });
 
+    svr.set_exception_handler(
+        [](const auto &req, auto &res, std::exception &e) {
+            SPDLOG_INFO(e.what());
+            res.status = 200;
+            res.set_content("{\"k\":\"v\"}", "application/json");
+        });
     svr.set_logger([](const Request &req, const Response &res) {
         printf("%s", log(req, res).c_str());
     });
