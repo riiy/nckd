@@ -56,9 +56,83 @@ int main(int argc, const char *argv[])
         return -1;
     }
 
-    svr.Get(R"(/api/([a-zA-z_]+)/)", [&](const auto &req, auto &res) {
-        auto table = req.matches[1];
-        res.set_content(table, "text/plain");
+    svr.Get("/webhook/", [&](const auto &req, auto &ret) {
+        auto headers = req.headers;
+        auto token = "";
+        for (auto it = headers.begin(); it != headers.end(); ++it)
+        {
+
+            const auto &x = *it;
+            if (x.first == "Authorization"){
+                    token =x.second.c_str();
+            }
+        }
+        cout << strlen(token) << endl;
+        if (strlen(token) == 48){
+
+        cout << token << endl;
+        auto connection = pool->get_connection();
+        if (!connection.valid())
+        {
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100101");
+        }
+        auto &test_connection = dynamic_cast<PGConnection &>(*connection);
+        auto conn = test_connection.acquire();
+        PGresult *res;
+        /* 开始一个事务块 */
+        res = PQexec(conn, "BEGIN");
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        {
+            fprintf(stderr, "BEGIN command failed: %s", PQerrorMessage(conn));
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100102");
+        }
+        PQclear(res);
+        const char *paramValues[1];
+        paramValues[0] = token;
+        res = PQexecParams(conn,
+                           "SELECT role, id FROM users WHERE token=$1;",
+                           1,    /* one param */
+                           NULL, /* let the backend deduce param type */
+                           paramValues,
+                           NULL, /* don't need param lengths since text */
+                           NULL, /* default to all text params */
+                           0);
+        if (PQresultStatus(res) != PGRES_TUPLES_OK)
+        {
+            fprintf(stderr, "FETCH ALL failed: %s", PQerrorMessage(conn));
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100103");
+        }
+        if (PQntuples(res) != 1)
+        {
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：业务错误为10 03 XX
+            throw std::runtime_error("100301");
+        }
+        auto role = std::string(PQgetvalue(res, 0, 0));
+        auto uid = std::string(PQgetvalue(res, 0, 1));
+        std::string content = "{\"X-Hasura-Role\": \"";
+        content.append(role).append("\", ");
+        content.append("\"X-Hasura-User-Id\": \"");
+        content.append(uid).append("\"}");
+        ret.set_content(content, "application/json");
+        }else{
+
+        ret.status = 401;
+        }
     });
 
     svr.Post("/login/", [&](const auto &req, auto &ret) {
@@ -123,8 +197,8 @@ int main(int argc, const char *argv[])
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
-            // 错误码：数据库连接为10 01 XX
-            throw std::runtime_error("100104");
+            // 错误码：业务错误为10 03 XX
+            throw std::runtime_error("100301");
         }
         auto pass = std::string(PQgetvalue(res, 0, 0));
         auto uid = std::string(PQgetvalue(res, 0, 1));
@@ -172,9 +246,8 @@ int main(int argc, const char *argv[])
         res = PQexec(conn, "END");
         pool->release_connection(std::move(connection));
 
-        std::string content =
-            "{\"code\":\"0\", \"data\": {\"token\": \"";
-        content.append(token). append("\"}}");
+        std::string content = "{\"code\":\"0\", \"data\": {\"token\": \"";
+        content.append(token).append("\"}}");
         ret.set_content(content, "application/json");
     });
     svr.Post("/register/", [&](const auto &req, auto &ret) {
@@ -276,14 +349,15 @@ int main(int argc, const char *argv[])
             throw std::runtime_error("100304");
         }
         const char *paramValues2[] = {email.c_str(), encoded};
-        res = PQexecParams(conn,
-                           "insert into users (email, password) values ($1, $2);",
-                           2,    /* one param */
-                           NULL, /* let the backend deduce param type */
-                           paramValues2,
-                           NULL, /* don't need param lengths since text */
-                           NULL, /* default to all text params */
-                           0);
+        res =
+            PQexecParams(conn,
+                         "insert into users (email, password) values ($1, $2);",
+                         2,    /* one param */
+                         NULL, /* let the backend deduce param type */
+                         paramValues2,
+                         NULL, /* don't need param lengths since text */
+                         NULL, /* default to all text params */
+                         0);
         if (PQresultStatus(res) != PGRES_COMMAND_OK)
         {
             fprintf(stderr, "BEGIN command failed: %s", PQerrorMessage(conn));
