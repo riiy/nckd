@@ -208,8 +208,6 @@ int main(int argc, const char *argv[])
         {
             fprintf(stderr, "BEGIN command failed: %s", PQerrorMessage(conn));
             PQclear(res);
-            /* 关闭入口 ... 我们不用检查错误 ... */
-            res = PQexec(conn, "CLOSE myportal");
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
@@ -231,8 +229,6 @@ int main(int argc, const char *argv[])
         {
             fprintf(stderr, "FETCH ALL failed: %s", PQerrorMessage(conn));
             PQclear(res);
-            /* 关闭入口 ... 我们不用检查错误 ... */
-            res = PQexec(conn, "CLOSE myportal");
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
@@ -242,8 +238,6 @@ int main(int argc, const char *argv[])
         if (PQntuples(res) > 0)
         {
             PQclear(res);
-            /* 关闭入口 ... 我们不用检查错误 ... */
-            res = PQexec(conn, "CLOSE myportal");
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
@@ -271,18 +265,40 @@ int main(int argc, const char *argv[])
                                ENCODED_LEN,
                                Argon2_id,
                                ARGON2_VERSION_10);
-        if (hash_ret == ARGON2_OK)
+        if (hash_ret != ARGON2_OK)
         {
-            SPDLOG_INFO(encoded);
+            SPDLOG_INFO(hash_ret);
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：业务错误为10 03 XX
+            throw std::runtime_error("100304");
         }
-        SPDLOG_INFO(hash_ret);
+        const char *paramValues2[] = {email.c_str(), encoded};
+        res = PQexecParams(conn,
+                           "insert into users (email, password) values ($1, $2);",
+                           2,    /* one param */
+                           NULL, /* let the backend deduce param type */
+                           paramValues2,
+                           NULL, /* don't need param lengths since text */
+                           NULL, /* default to all text params */
+                           0);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        {
+            fprintf(stderr, "BEGIN command failed: %s", PQerrorMessage(conn));
+            PQclear(res);
+            /* 结束事务 */
+            res = PQexec(conn, "END");
+            pool->release_connection(std::move(connection));
+            // 错误码：业务错误为10 03 XX
+            throw std::runtime_error("100305");
+        }
         PQclear(res);
-        /* 关闭入口 ... 我们不用检查错误 ... */
-        res = PQexec(conn, "CLOSE myportal");
         /* 结束事务 */
         res = PQexec(conn, "END");
         pool->release_connection(std::move(connection));
-        std::string content = std::string(encoded);
+        std::string content = "{\"code\": 0, \"msg\": \"注册成功\"}";
         ret.set_content(content, "application/json");
     });
 
@@ -302,7 +318,10 @@ int main(int argc, const char *argv[])
         [](const auto &req, auto &res, std::exception &e) {
             SPDLOG_INFO(e.what());
             res.status = 200;
-            res.set_content("{\"k\":\"v\"}", "application/json");
+            std::string content = "{\"code\": ";
+            content.append(std::string(e.what()));
+            content.append("}");
+            res.set_content(content, "application/json");
         });
     svr.set_logger([](const Request &req, const Response &res) {
         printf("%s", log(req, res).c_str());
