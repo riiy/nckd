@@ -61,77 +61,84 @@ int main(int argc, const char *argv[])
         auto token = "";
         for (auto it = headers.begin(); it != headers.end(); ++it)
         {
-
             const auto &x = *it;
-            if (x.first == "Authorization"){
-                    token =x.second.c_str();
+            if (x.first == "Authorization")
+            {
+                token = x.second.c_str();
             }
         }
-        cout << strlen(token) << endl;
-        if (strlen(token) == 48){
-
-        cout << token << endl;
-        auto connection = pool->get_connection();
-        if (!connection.valid())
+        if (strlen(token) == 48)
         {
-            // 错误码：数据库连接为10 01 XX
-            throw std::runtime_error("100101");
-        }
-        auto &test_connection = dynamic_cast<PGConnection &>(*connection);
-        auto conn = test_connection.acquire();
-        PGresult *res;
-        /* 开始一个事务块 */
-        res = PQexec(conn, "BEGIN");
-        if (PQresultStatus(res) != PGRES_COMMAND_OK)
-        {
-            fprintf(stderr, "BEGIN command failed: %s", PQerrorMessage(conn));
+            auto connection = pool->get_connection();
+            if (!connection.valid())
+            {
+                // 错误码：数据库连接为10 01 XX
+                throw std::runtime_error("100101");
+            }
+            auto &pg_conn = dynamic_cast<PGConnection &>(*connection);
+            auto conn = pg_conn.acquire();
+            PGresult *res;
+            /* 开始一个事务块 */
+            res = PQexec(conn, "BEGIN");
+            if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            {
+                fprintf(stderr,
+                        "BEGIN command failed: %s",
+                        PQerrorMessage(conn));
+                PQclear(res);
+                /* 结束事务 */
+                res = PQexec(conn, "END");
+                pool->release_connection(std::move(connection));
+                // 错误码：数据库连接为10 01 XX
+                throw std::runtime_error("100102");
+            }
+            PQclear(res);
+            const char *paramValues[1];
+            paramValues[0] = token;
+            res = PQexecParams(conn,
+                               "SELECT role, id FROM users WHERE token=$1;",
+                               1,    /* one param */
+                               NULL, /* let the backend deduce param type */
+                               paramValues,
+                               NULL, /* don't need param lengths since text */
+                               NULL, /* default to all text params */
+                               0);
+            if (PQresultStatus(res) != PGRES_TUPLES_OK)
+            {
+                fprintf(stderr, "FETCH ALL failed: %s", PQerrorMessage(conn));
+                PQclear(res);
+                /* 结束事务 */
+                res = PQexec(conn, "END");
+                pool->release_connection(std::move(connection));
+                // 错误码：数据库连接为10 01 XX
+                throw std::runtime_error("100103");
+            }
+            if (PQntuples(res) != 1)
+            {
+                PQclear(res);
+                /* 结束事务 */
+                res = PQexec(conn, "END");
+                pool->release_connection(std::move(connection));
+                // 错误码：业务错误为10 03 XX
+                throw std::runtime_error("100301");
+            }
+            auto role = std::string(PQgetvalue(res, 0, 0));
+            auto uid = std::string(PQgetvalue(res, 0, 1));
             PQclear(res);
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
-            // 错误码：数据库连接为10 01 XX
-            throw std::runtime_error("100102");
+            std::string content = "{\"X-Hasura-Role\": \"";
+            content.append(role).append("\", ");
+            content.append("\"X-Hasura-User-Id\": \"");
+            content.append(uid).append("\"}");
+            ret.set_content(content, "application/json");
         }
-        PQclear(res);
-        const char *paramValues[1];
-        paramValues[0] = token;
-        res = PQexecParams(conn,
-                           "SELECT role, id FROM users WHERE token=$1;",
-                           1,    /* one param */
-                           NULL, /* let the backend deduce param type */
-                           paramValues,
-                           NULL, /* don't need param lengths since text */
-                           NULL, /* default to all text params */
-                           0);
-        if (PQresultStatus(res) != PGRES_TUPLES_OK)
+        else
         {
-            fprintf(stderr, "FETCH ALL failed: %s", PQerrorMessage(conn));
-            PQclear(res);
-            /* 结束事务 */
-            res = PQexec(conn, "END");
-            pool->release_connection(std::move(connection));
-            // 错误码：数据库连接为10 01 XX
-            throw std::runtime_error("100103");
-        }
-        if (PQntuples(res) != 1)
-        {
-            PQclear(res);
-            /* 结束事务 */
-            res = PQexec(conn, "END");
-            pool->release_connection(std::move(connection));
-            // 错误码：业务错误为10 03 XX
-            throw std::runtime_error("100301");
-        }
-        auto role = std::string(PQgetvalue(res, 0, 0));
-        auto uid = std::string(PQgetvalue(res, 0, 1));
-        std::string content = "{\"X-Hasura-Role\": \"";
-        content.append(role).append("\", ");
-        content.append("\"X-Hasura-User-Id\": \"");
-        content.append(uid).append("\"}");
-        ret.set_content(content, "application/json");
-        }else{
-
-        ret.status = 401;
+            std::string content = "{\"X-Hasura-Role\": \"anoymous\",";
+            content.append("\"X-Hasura-User-Id\": \"0\"}");
+            ret.set_content(content, "application/json");
         }
     });
 
@@ -155,8 +162,8 @@ int main(int argc, const char *argv[])
             // 错误码：数据库连接为10 01 XX
             throw std::runtime_error("100101");
         }
-        auto &test_connection = dynamic_cast<PGConnection &>(*connection);
-        auto conn = test_connection.acquire();
+        auto &pg_conn = dynamic_cast<PGConnection &>(*connection);
+        auto conn = pg_conn.acquire();
         PGresult *res;
         /* 开始一个事务块 */
         res = PQexec(conn, "BEGIN");
@@ -272,8 +279,8 @@ int main(int argc, const char *argv[])
             // 错误码：数据库连接为10 01 XX
             throw std::runtime_error("100101");
         }
-        auto &test_connection = dynamic_cast<PGConnection &>(*connection);
-        auto conn = test_connection.acquire();
+        auto &pg_conn = dynamic_cast<PGConnection &>(*connection);
+        auto conn = pg_conn.acquire();
         PGresult *res;
         /* 开始一个事务块 */
         res = PQexec(conn, "BEGIN");
