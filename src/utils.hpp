@@ -102,11 +102,11 @@ class PGConnection final : public Connection
   public:
     bool heart_beat() override
     {
-        return connected;
+        return PQstatus(conn) == CONNECTION_OK;
     }
     bool is_healthy() override
     {
-        return connected;
+        return PQstatus(conn) == CONNECTION_OK;
     }
     bool connect() override
     {
