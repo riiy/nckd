@@ -119,8 +119,8 @@ int main(int argc, const char *argv[])
                 /* 结束事务 */
                 res = PQexec(conn, "END");
                 pool->release_connection(std::move(connection));
-                // 错误码：业务错误为10 03 XX
-                throw std::runtime_error("100301");
+                // 错误码：业务错误为10 03 XX token 错误
+                throw std::runtime_error("100305");
             }
             auto role = std::string(PQgetvalue(res, 0, 0));
             auto uid = std::string(PQgetvalue(res, 0, 1));
@@ -219,7 +219,7 @@ int main(int argc, const char *argv[])
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
-            // 错误码：业务错误为10 03 XX
+            // 错误码：业务错误为10 03 XX 密码错误
             throw std::runtime_error("100302");
         }
         PQclear(res);
@@ -321,7 +321,7 @@ int main(int argc, const char *argv[])
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
-            // 错误码：业务错误为10 03 XX
+            // 错误码：业务错误为10 03 XX 邮件地址重复
             throw std::runtime_error("100303");
         }
         unsigned char out[OUT_LEN];
@@ -352,7 +352,7 @@ int main(int argc, const char *argv[])
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
-            // 错误码：业务错误为10 03 XX
+            // 错误码：业务错误为10 03 XX 密码不合规范
             throw std::runtime_error("100304");
         }
         const char *paramValues2[] = {email.c_str(), encoded};
@@ -372,8 +372,8 @@ int main(int argc, const char *argv[])
             /* 结束事务 */
             res = PQexec(conn, "END");
             pool->release_connection(std::move(connection));
-            // 错误码：业务错误为10 03 XX
-            throw std::runtime_error("100305");
+            // 错误码：数据库连接为10 01 XX
+            throw std::runtime_error("100101");
         }
         PQclear(res);
         /* 结束事务 */
