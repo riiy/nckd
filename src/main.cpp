@@ -62,7 +62,7 @@ int main(int argc, const char *argv[])
         for (auto it = headers.begin(); it != headers.end(); ++it)
         {
             const auto &x = *it;
-            if (x.first == "Authorization")
+            if (x.first == "authorization")
             {
                 token = x.second.c_str();
             }
@@ -398,11 +398,18 @@ int main(int argc, const char *argv[])
     svr.set_exception_handler(
         [](const auto &req, auto &res, std::exception &e) {
             SPDLOG_INFO(e.what());
-            res.status = 200;
-            std::string content = "{\"code\": ";
-            content.append(std::string(e.what()));
-            content.append("}");
-            res.set_content(content, "application/json");
+            if (!std::string(e.what()).compare("100305"))
+            {
+                res.status = 401;
+            }
+            else
+            {
+                res.status = 200;
+                std::string content = "{\"code\": ";
+                content.append(std::string(e.what()));
+                content.append("}");
+                res.set_content(content, "application/json");
+            }
         });
     svr.set_logger([](const Request &req, const Response &res) {
         printf("%s", log(req, res).c_str());
